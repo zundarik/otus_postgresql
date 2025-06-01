@@ -1,0 +1,262 @@
+ДЗ - 3
+Работа с MVCC
+Описание/Пошаговая инструкция выполнения домашнего задания:
+Выполнить pgbench -c8 -P 6 -T 60 -U postgres postgres.
+Настроить параметры vacuum/autovacuum.
+Заново протестировать: pgbench -c8 -P 6 -T 60 -U postgres postgres и сравнить результаты.
+Создать таблицу с текстовым полем и заполнить случайными или сгенерированными данным в размере 1млн строк.
+Посмотреть размер файла с таблицей.
+5 раз обновить все строчки и добавить к каждой строчке любой символ.
+Посмотреть количество мертвых строчек в таблице и когда последний раз приходил автовакуум.
+Отключить Автовакуум на таблице и опять 5 раз обновить все строки.
+Объяснить полученные результаты.
+
+
+Привел комманды используемые в ходе работы над домашним заданием
+psql (16.9 (Ubuntu 16.9-0ubuntu0.24.04.1))
+
+В ходе настроийки параметров по autovacuum столкнулся с проблемой,
+которая описана в конце файла.
+
+-----
+wsl psql -U postgres -h 127.0.0.1 -p 5432
+
+-----
+postgres=# select current_setting('config_file');
+             current_setting
+-----------------------------------------
+ /etc/postgresql/16/main/postgresql.conf
+
+-----
+test=> \dt
+              List of relations
+ Schema |       Name       | Type  |  Owner
+--------+------------------+-------+----------
+ public | pgbench_accounts | table | postgres
+ public | pgbench_branches | table | postgres
+ public | pgbench_history  | table | postgres
+ public | pgbench_tellers  | table | postgres
+ public | student          | table | test
+ public | test             | table | test
+(6 rows)
+
+-----
+test=> SELECT pg_size_pretty(pg_total_relation_size('student'));
+ pg_size_pretty
+----------------
+ 135 MB
+(1 row)
+
+-----
+postgres@comp1:/mnt/c/Users/comp2$ pgbench -i -d test -U postgres -h 127.0.0.1 -p 5432
+Password: 
+dropping old tables...
+NOTICE:  table "pgbench_accounts" does not exist, skipping
+NOTICE:  table "pgbench_branches" does not exist, skipping
+NOTICE:  table "pgbench_history" does not exist, skipping
+NOTICE:  table "pgbench_tellers" does not exist, skipping
+creating tables...
+generating data (client-side)...
+100000 of 100000 tuples (100%) done (elapsed 0.03 s, remaining 0.00 s)
+vacuuming...
+creating primary keys...
+done in 0.19 s (drop tables 0.00 s, create tables 0.02 s, client-side generate 0.10 s, vacuum 0.03 s, primary keys 0.05 s).
+
+-----
+ВАРИАНТ 1
+postgres@comp1:/mnt/c/Users/comp2$ pgbench -c 50 -j 2 -P 10 -T 60 test
+pgbench (16.9 (Ubuntu 16.9-0ubuntu0.24.04.1))
+starting vacuum...end.
+progress: 10.0 s, 550.3 tps, lat 89.406 ms stddev 105.072, 0 failed
+progress: 20.0 s, 552.6 tps, lat 89.939 ms stddev 114.548, 0 failed
+progress: 30.0 s, 555.5 tps, lat 90.582 ms stddev 113.551, 0 failed
+progress: 40.0 s, 568.6 tps, lat 88.091 ms stddev 107.230, 0 failed
+progress: 50.0 s, 583.7 tps, lat 85.717 ms stddev 105.763, 0 failed
+progress: 60.0 s, 578.4 tps, lat 85.571 ms stddev 99.055, 0 failed
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 50
+number of threads: 2
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 33941
+number of failed transactions: 0 (0.000%)
+latency average = 88.373 ms
+latency stddev = 107.887 ms
+initial connection time = 55.584 ms
+tps = 565.158113 (without initial connection time)
+
+-----
+ВАРИАНТ 2
+postgres@comp1:/mnt/c/Users/comp2$ pgbench -c8 -P 6 -T 60 test
+pgbench (16.9 (Ubuntu 16.9-0ubuntu0.24.04.1))
+starting vacuum...end.
+progress: 6.0 s, 609.0 tps, lat 13.080 ms stddev 10.266, 0 failed
+progress: 12.0 s, 618.0 tps, lat 12.928 ms stddev 10.027, 0 failed
+progress: 18.0 s, 610.7 tps, lat 13.089 ms stddev 10.293, 0 failed
+progress: 24.0 s, 607.8 tps, lat 13.127 ms stddev 10.736, 0 failed
+progress: 30.0 s, 607.7 tps, lat 13.162 ms stddev 10.385, 0 failed
+progress: 36.0 s, 639.5 tps, lat 12.501 ms stddev 9.059, 0 failed
+progress: 42.0 s, 631.0 tps, lat 12.679 ms stddev 9.530, 0 failed
+progress: 48.0 s, 622.7 tps, lat 12.833 ms stddev 10.283, 0 failed
+progress: 54.0 s, 634.8 tps, lat 12.587 ms stddev 9.701, 0 failed
+progress: 60.0 s, 640.8 tps, lat 12.475 ms stddev 9.050, 0 failed
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 8
+number of threads: 1
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 37340
+number of failed transactions: 0 (0.000%)
+latency average = 12.841 ms
+latency stddev = 9.940 ms
+initial connection time = 14.109 ms
+tps = 622.361547 (without initial connection time)
+
+-----
+add to end /etc/postgresql/16/main/postgresql.conf
+
+# Connectivity
+max_connections = 100
+superuser_reserved_connections = 3
+
+# Memory Settings
+shared_buffers = 4GB
+effective_cache_size = 12GB
+work_mem = 16MB
+maintenance_work_mem = 420MB
+
+fsync = on
+synchronous_commit = on
+checkpoint_completion_target = 0.9
+effective_io_concurrency = 100
+random_page_cost = 1.25
+
+min_wal_size = 512MB
+max_wal_size = 1GB
+wal_buffers = -1
+
+-----
+select pg_reload_conf();
+sudo pg_ctlcluster 16 main restart
+
+postgres=# show work_mem;
+FATAL:  terminating connection due to administrator command
+SSL connection has been closed unexpectedly
+The connection to the server was lost. Attempting reset: Succeeded.
+SSL connection (protocol: TLSv1.3, cipher: TLS_AES_256_GCM_SHA384, compression: off)
+
+postgres=# show work_mem;
+-[ RECORD 1 ]--
+work_mem | 16MB
+
+-----
+postgres@comp1:/mnt/c/Users/comp2$ pgbench -c 50 -j 2 -P 10 -T 60 test
+pgbench (16.9 (Ubuntu 16.9-0ubuntu0.24.04.1))
+starting vacuum...end.
+progress: 10.0 s, 587.4 tps, lat 83.717 ms stddev 105.314, 0 failed
+progress: 20.0 s, 592.5 tps, lat 84.255 ms stddev 113.416, 0 failed
+progress: 30.0 s, 592.3 tps, lat 84.309 ms stddev 99.010, 0 failed
+progress: 40.0 s, 593.8 tps, lat 83.630 ms stddev 143.334, 0 failed
+progress: 50.0 s, 592.8 tps, lat 85.400 ms stddev 176.562, 0 failed
+progress: 60.0 s, 592.9 tps, lat 83.825 ms stddev 114.154, 0 failed
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 50
+number of threads: 2
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 35567
+number of failed transactions: 0 (0.000%)
+latency average = 84.319 ms
+latency stddev = 128.225 ms
+initial connection time = 56.542 ms
+tps = 592.558576 (without initial connection time)
+
+-----
+postgres@comp1:/mnt/c/Users/comp2$ pgbench -c8 -P 6 -T 60 test
+pgbench (16.9 (Ubuntu 16.9-0ubuntu0.24.04.1))
+starting vacuum...end.
+progress: 6.0 s, 619.7 tps, lat 12.842 ms stddev 10.483, 0 failed
+progress: 12.0 s, 618.5 tps, lat 12.922 ms stddev 10.218, 0 failed
+progress: 18.0 s, 618.5 tps, lat 12.924 ms stddev 9.689, 0 failed
+progress: 24.0 s, 616.5 tps, lat 12.963 ms stddev 9.857, 0 failed
+progress: 30.0 s, 612.3 tps, lat 13.065 ms stddev 10.190, 0 failed
+progress: 36.0 s, 618.0 tps, lat 12.926 ms stddev 10.150, 0 failed
+progress: 42.0 s, 627.3 tps, lat 12.740 ms stddev 9.450, 0 failed
+progress: 48.0 s, 619.7 tps, lat 12.907 ms stddev 10.164, 0 failed
+progress: 54.0 s, 610.5 tps, lat 13.089 ms stddev 10.704, 0 failed
+progress: 60.0 s, 625.7 tps, lat 12.751 ms stddev 9.817, 0 failed
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 8
+number of threads: 1
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 37128
+number of failed transactions: 0 (0.000%)
+latency average = 12.915 ms
+latency stddev = 10.079 ms
+initial connection time = 15.992 ms
+tps = 618.852592 (without initial connection time)
+
+-----
+Похоже, что tps в-первом варианте увеличился незначительно, а во-втором даже уменьшился.
+Параметры, точно применились.
+
+-----
+Настроить параметры vacuum/autovacuum
+
+SELECT name, setting, context, short_desc
+FROM pg_settings WHERE name like 'vacuum%';
+
+add to end /etc/postgresql/16/main/postgresql.conf
+vacuum_cost_delay = 0
+vacuum_cost_limit = 200
+vacuum_cost_page_hit = 1
+vacuum_cost_page_miss = 5
+vacuum_cost_page_dirty = 10
+
+SELECT name, setting, context, short_desc
+FROM pg_settings WHERE name like 'autovacuum%';
+
+add to end /etc/postgresql/16/main/postgresql.conf
+Добавление этих параметров по autovacuum приводит к недоступности постгреса:
+log_autovacuum_min_duration = 0
+autovacuum_max_worker = 10
+autovacuum_naptime = 25s
+autovacuum_vacuum_threshold = 25
+autovacuum_vacuum_scale_factor = 0.05
+autovacuum_vacuum_cost_delay = 10
+autovacuum_vacuum_cost_limit = 1000
+
+-----
+При попытке подключиться:
+sudo -u postgres psql
+psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
+        Is the server running locally and accepting connections on that socket?
+
+При попытке рестарта:
+sudo pg_ctlcluster 16 main restart
+Job for postgresql@16-main.service failed because the service did not take the steps required by its unit configuration.
+See "systemctl status postgresql@16-main.service" and "journalctl -xeu postgresql@16-main.service" for details.
+
+Выход, это удаление добавленных параметров по autovacuum 
+и рестарт сервиса sudo systemctl restart postgresql.service
+-----
+
+-----
+select pg_reload_conf();
+sudo pg_ctlcluster 16 main restart
+
+-----
+
+
+
+
+
