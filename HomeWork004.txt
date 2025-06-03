@@ -1,0 +1,338 @@
+Работа с блокировками
+
+Описание/Пошаговая инструкция выполнения домашнего задания:
+Настройте сервер так, чтобы в журнал сообщений сбрасывалась информация о блокировках, удерживаемых более 200 миллисекунд.
+
+Воспроизведите ситуацию, при которой в журнале появятся такие сообщения.
+Смоделируйте ситуацию обновления одной и той же строки тремя командами UPDATE в разных сеансах.
+
+Изучите возникшие блокировки в представлении pg_locks и убедитесь, что все они понятны.
+Воспроизведите взаимоблокировку трех транзакций.
+
+Можно ли разобраться в ситуации постфактум, изучая журнал сообщений?
+
+используемые команды про процессе работы - настройка
+=====
+SHOW deadlock_timeout;
+ deadlock_timeout
+------------------
+ 1s
+(1 row)
+
+SELECT pg_reload_conf();
+ pg_reload_conf
+----------------
+ t
+(1 row)
+
+ALTER SYSTEM SET log_lock_waits = on;
+
+=====
+tail -n 10 /var/log/postgresql/postgresql-16-main.log
+
+        avg read rate: 0.000 MB/s, avg write rate: 0.020 MB/s
+        buffer usage: 30152 hits, 0 misses, 1 dirtied
+        system usage: CPU: user: 0.06 s, system: 0.02 s, elapsed: 0.39 s
+2025-06-03 12:03:23.249 +11 [1234] LOG:  checkpoint complete: wrote 77499 buffers (14.8%); 0 WAL file(s) added, 2 removed, 45 recycled; write=269.592 s, sync=0.005 s, total=269.773 s; sync files=4, longest=0.004 s, average=0.002 s; distance=764417 kB, estimate=811338 kB; lsn=2/1AF4A4E8, redo lsn=2/803CDD8
+2025-06-03 12:16:23.155 +11 [1898] postgres@postgres LOG:  could not receive data from client: Connection reset by peer
+2025-06-03 12:18:53.573 +11 [1234] LOG:  checkpoint starting: time
+2025-06-03 12:20:29.396 +11 [1234] LOG:  checkpoint complete: wrote 955 buffers (0.2%); 0 WAL file(s) added, 0 removed, 19 recycled; write=95.680 s, sync=0.058 s, total=95.823 s; sync files=316, longest=0.005 s, average=0.001 s; distance=314615 kB, estimate=761665 kB; lsn=2/1B37ACB0, redo lsn=2/1B37AC78
+2025-06-03 12:25:56.246 +11 [1233] LOG:  received SIGHUP, reloading configuration files
+2025-06-03 12:26:15.676 +11 [1233] LOG:  received SIGHUP, reloading configuration files
+2025-06-03 12:26:15.677 +11 [1233] LOG:  parameter "log_lock_waits" changed to "on"
+
+=====
+otus=# CREATE EXTENSION pageinspect;
+
+otus=# SHOW lock_timeout;
+ lock_timeout
+--------------
+ 0
+(1 row)
+
+=====
+select * from pg_locks;
+select locktype,database,relation,tuple,virtualxid,virtualtransaction,pid,mode,granted,fastpath from pg_locks;
+
+
+SHOW log_lock_waits;
+log_lock_waits 
+----------------
+ on
+(1 row)
+
+ deadlock_timeout
+------------------
+ 1s
+(1 row)
+
+otus=# SHOW log_min_duration_statement;
+ log_min_duration_statement
+----------------------------
+ -1
+(1 row)
+
+SHOW lock_timeout;
+ lock_timeout
+--------------
+ 0
+(1 row)
+
+=====
+add to end /etc/postgresql/16/main/postgresql.conf
+log_lock_waits = on
+deadlock_timeout = 10s
+log_min_duration_statement = 5s
+
+otus=# SHOW log_lock_waits;
+ log_lock_waits 
+----------------
+ on
+(1 row)
+
+otus=# SHOW lock_timeout;
+ lock_timeout 
+--------------
+ 0
+(1 row)
+
+otus=# SHOW log_min_duration_statement;
+ log_min_duration_statement 
+----------------------------
+ 5s
+(1 row)
+
+otus=# show deadlock_timeout;
+ deadlock_timeout 
+------------------
+ 10s
+(1 row)
+
+
+используемые команды про процессе работы - запросы
+=====
+sudo -u postgres psql
+create database otus;
+
+\c otus
+
+CREATE TABLE test2 (i serial, amount int);
+INSERT INTO test2(amount) VALUES (100),(500);
+SELECT * FROM test2;
+
+SELECT pg_backend_pid();
+ pg_backend_pid
+----------------
+           2301
+(1 row)
+
+otus=# SELECT locktype, relation::REGCLASS, virtualxid AS virtxid, transactionid AS xid, mode, granted FROM pg_locks WHERE pid = 2301;
+  locktype  | relation | virtxid | xid |      mode       | granted
+------------+----------+---------+-----+-----------------+---------
+ relation   | pg_locks |         |     | AccessShareLock | t
+ virtualxid |          | 4/10958 |     | ExclusiveLock   | t
+(2 rows)
+
+otus=# SELECT pg_blocking_pids(2301);
+ pg_blocking_pids
+------------------
+ {}
+(1 row)
+
+otus=# SELECT * FROM pg_stat_activity WHERE pid = ANY(pg_blocking_pids(2301)) \gx
+(0 rows)
+
+=====
+begin;
+BEGIN
+otus=*# UPDATE test2 set amount = 501 WHERE i = 1;
+UPDATE 1
+otus=*# SELECT * FROM test2;
+ i | amount
+---+--------
+ 2 |    500
+ 1 |    501
+(2 rows)
+
+begin;
+UPDATE test2 set amount = 502 WHERE i = 1;
+SELECT * FROM test2;
+
+begin;
+UPDATE test2 set amount = 503 WHERE i = 1;
+SELECT * FROM test2;
+
+SELECT locktype, relation::REGCLASS, virtualxid AS virtxid, transactionid AS xid, mode, granted FROM pg_locks WHERE pid = 3568;  
+  locktype  | relation | virtxid | xid |      mode       | granted 
+------------+----------+---------+-----+-----------------+---------
+ relation   | pg_locks |         |     | AccessShareLock | t
+ virtualxid |          | 7/11    |     | ExclusiveLock   | t        
+(2 rows)
+
+show transaction isolation level;
+ transaction_isolation
+-----------------------
+ read committed
+(1 row)
+
+=====
+SELECT locktype, relation::REGCLASS, mode, granted, pid, pg_blocking_pids(pid) AS wait_for
+FROM pg_locks WHERE relation = 'test2'::regclass order by pid;
+
+ locktype | relation |       mode       | granted | pid  | wait_for
+----------+----------+------------------+---------+------+----------
+ relation | test2    | RowExclusiveLock | t       | 3235 | {3364}
+ tuple    | test2    | ExclusiveLock    | t       | 3235 | {3364}
+ relation | test2    | RowExclusiveLock | t       | 3364 | {}
+(3 rows)
+
+
+SELECT locktype, mode, granted, pid, pg_blocking_pids(pid) AS wait_for
+FROM pg_locks WHERE relation = 'test2'::regclass; 
+
+ locktype |       mode       | granted | pid  | wait_for
+----------+------------------+---------+------+----------
+ relation | RowExclusiveLock | t       | 3364 | {}    
+ relation | RowExclusiveLock | t       | 3235 | {3364}
+ tuple    | ExclusiveLock    | t       | 3235 | {3364}
+(3 rows)
+
+=====
+tail -n 30 /var/l
+og/postgresql/postgresql-16-main.log
+2025-06-03 13:29:32.245 +11 [3235] postgres@otus STATEMENT:  UPDATE test2 set amount = 502 WHERE i = 1;     
+2025-06-03 13:29:32.247 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:29:32.247 +11 [3235] postgres@otus STATEMENT:  SELECT * FROM test2;
+2025-06-03 13:29:37.401 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:29:37.401 +11 [3235] postgres@otus STATEMENT:  begin;
+2025-06-03 13:29:43.234 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:29:43.234 +11 [3235] postgres@otus STATEMENT:  SELECT * FROM test2;
+2025-06-03 13:31:39.039 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:31:39.039 +11 [3235] postgres@otus STATEMENT:  begin;
+2025-06-03 13:31:39.039 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:31:39.039 +11 [3235] postgres@otus STATEMENT:  UPDATE test2 set amount = 502 WHERE i = 1;     
+2025-06-03 13:32:02.513 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:32:02.513 +11 [3235] postgres@otus STATEMENT:  UPDATE test2 set amount = 502 WHERE i = 1;     
+2025-06-03 13:32:09.639 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:32:09.639 +11 [3235] postgres@otus STATEMENT:  begin;
+2025-06-03 13:32:14.444 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:32:14.444 +11 [3235] postgres@otus STATEMENT:  begin;
+2025-06-03 13:32:26.567 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:32:26.567 +11 [3235] postgres@otus STATEMENT:  begin;
+2025-06-03 13:32:57.536 +11 [3235] postgres@otus ERROR:  current transaction is aborted, commands ignored until end of transaction block
+2025-06-03 13:32:57.536 +11 [3235] postgres@otus STATEMENT:  begin;
+2025-06-03 13:33:23.997 +11 [3401] postgres@otus LOG:  process 3401 still waiting for ShareLock on transaction 291812 after 10000.070 ms
+2025-06-03 13:33:23.997 +11 [3401] postgres@otus DETAIL:  Process holding the lock: 3364. Wait queue: 3401. 
+2025-06-03 13:33:23.997 +11 [3401] postgres@otus CONTEXT:  while updating tuple (0,1) in relation "test2"   
+2025-06-03 13:33:23.997 +11 [3401] postgres@otus STATEMENT:  UPDATE test2 set amount = 503 WHERE i = 1;     
+2025-06-03 13:33:53.766 +11 [3191] LOG:  checkpoint starting: time
+2025-06-03 13:33:53.792 +11 [3191] LOG:  checkpoint complete: wrote 1 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.010 s, sync=0.002 s, total=0.027 s; sync files=1, longest=0.002 s, average=0.002 s; distance=0 kB, estimate=0 kB; lsn=2/1B3D0FA0, redo lsn=2/1B3D0F60
+2025-06-03 13:34:01.649 +11 [3235] postgres@otus LOG:  process 3235 still waiting for ExclusiveLock on tuple (0,1) of relation 24692 of database 24690 after 10000.804 ms
+2025-06-03 13:34:01.649 +11 [3235] postgres@otus DETAIL:  Process holding the lock: 3401. Wait queue: 3235. 
+2025-06-03 13:34:01.649 +11 [3235] postgres@otus STATEMENT:  UPDATE test2 set amount = 502 WHERE i = 1;
+
+=====
+  locktype  | relation | virtxid | xid |      mode       | granted
+------------+----------+---------+-----+-----------------+---------
+ relation   | pg_locks |         |     | AccessShareLock | t
+ virtualxid |          | 7/15    |     | ExclusiveLock   | t
+(2 rows)
+
+tail -n 10 /var/log/postgresql/postgresql-16-main.log
+2025-06-03 13:34:01.649 +11 [3235] postgres@otus STATEMENT:  UPDATE test2 set amount = 502 WHERE i = 1;     
+2025-06-03 13:39:13.754 +11 [3401] postgres@otus LOG:  process 3401 acquired ShareLock on transaction 291812 after 359756.999 ms
+2025-06-03 13:39:13.754 +11 [3401] postgres@otus CONTEXT:  while updating tuple (0,1) in relation "test2"   
+2025-06-03 13:39:13.754 +11 [3401] postgres@otus STATEMENT:  UPDATE test2 set amount = 503 WHERE i = 1;     
+2025-06-03 13:39:13.754 +11 [3235] postgres@otus LOG:  process 3235 acquired ExclusiveLock on tuple (0,1) of relation 24692 of database 24690 after 322105.066 ms 
+2025-06-03 13:39:13.754 +11 [3235] postgres@otus STATEMENT:  UPDATE test2 set amount = 502 WHERE i = 1;     
+2025-06-03 13:39:13.754 +11 [3401] postgres@otus LOG:  duration: 359757.753 ms  statement: UPDATE test2 set amount = 503 WHERE i = 1;
+2025-06-03 13:39:21.061 +11 [3401] postgres@otus ERROR:  syntax error at or near "commint" at character 1   
+2025-06-03 13:39:21.061 +11 [3401] postgres@otus STATEMENT:  commint;
+2025-06-03 13:39:21.061 +11 [3235] postgres@otus LOG:  duration: 329412.512 ms  statement: UPDATE test2 set amount = 502 WHERE i = 1;
+
+ locktype | relation | mode | granted | pid | wait_for
+
+----------+----------+------+---------+-----+----------
+(0 rows)
+
+=====
+Воспроизведите взаимоблокировку трех транзакций
+
+BEGIN;
+CREATE TABLE accounts(
+  acc_no integer PRIMARY KEY,
+  amount numeric
+);
+
+INSERT INTO accounts VALUES (1, 100.00), (2, 200.00), (3, 300.00), (4, 400.00), (5, 500.00);
+
+SELECT * FROM accounts_v;
+
+BEGIN;
+UPDATE accounts SET amount = amount - 10.00 WHERE acc_no = 1;
+BEGIN;
+UPDATE accounts SET amount = amount + 10.00 WHERE acc_no = 2;
+
+
+BEGIN;
+UPDATE accounts SET amount = amount - 20.00 WHERE acc_no = 2;
+UPDATE accounts SET amount = amount + 20.00 WHERE acc_no = 3;
+
+
+BEGIN;
+UPDATE accounts SET amount = amount - 30.00 WHERE acc_no = 3;
+UPDATE accounts SET amount = amount + 30.00 WHERE acc_no = 1;
+
+
+ERROR:  deadlock detected
+DETAIL:  Process 3235 waits for ShareLock on transaction 291823; blocked by process 3568.
+Process 3568 waits for ShareLock on transaction 291821; blocked by process 3364.
+Process 3364 waits for ShareLock on transaction 291822; blocked by process 3235.
+HINT:  See server log for query details.
+CONTEXT:  while updating tuple (0,3) in relation "accounts"
+
+
+logs
+2025-06-03 13:54:01.754 +11 [3364] postgres@otus STATEMENT:  show accounts_v;
+2025-06-03 13:54:12.644 +11 [3364] postgres@otus ERROR:  syntax error at or near "FROM" at character 1      
+2025-06-03 13:54:12.644 +11 [3364] postgres@otus STATEMENT:  FROM heap_page_items(get_raw_page('accounts',0))
+        ;
+2025-06-03 13:57:43.621 +11 [3364] postgres@otus LOG:  process 3364 still waiting for ShareLock on transaction 291822 after 10000.425 ms
+2025-06-03 13:57:43.621 +11 [3364] postgres@otus DETAIL:  Process holding the lock: 3235. Wait queue: 3364. 
+2025-06-03 13:57:43.621 +11 [3364] postgres@otus CONTEXT:  while updating tuple (0,2) in relation "accounts"
+2025-06-03 13:57:43.621 +11 [3364] postgres@otus STATEMENT:  UPDATE accounts SET amount = amount + 10.00 WHERE acc_no = 2;
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus LOG:  process 3235 detected deadlock while waiting for ShareLock on transaction 291823 after 10001.821 ms        
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus DETAIL:  Process holding the lock: 3568. Wait queue: .     
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus CONTEXT:  while updating tuple (0,3) in relation "accounts"
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus STATEMENT:  UPDATE accounts SET amount = amount + 20.00 WHERE acc_no = 3;
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus ERROR:  deadlock detected
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus DETAIL:  Process 3235 waits for ShareLock on transaction 291823; blocked by process 3568.
+        Process 3568 waits for ShareLock on transaction 291821; blocked by process 3364.
+        Process 3364 waits for ShareLock on transaction 291822; blocked by process 3235.
+        Process 3235: UPDATE accounts SET amount = amount + 20.00 WHERE acc_no = 3;
+        Process 3568: UPDATE accounts SET amount = amount + 30.00 WHERE acc_no = 1;
+        Process 3364: UPDATE accounts SET amount = amount + 10.00 WHERE acc_no = 2;
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus HINT:  See server log for query details.
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus CONTEXT:  while updating tuple (0,3) in relation "accounts"
+2025-06-03 13:57:49.205 +11 [3235] postgres@otus STATEMENT:  UPDATE accounts SET amount = amount + 20.00 WHERE acc_no = 3;
+2025-06-03 13:57:49.205 +11 [3364] postgres@otus LOG:  process 3364 acquired ShareLock on transaction 291822 after 15584.777 ms
+2025-06-03 13:57:49.205 +11 [3364] postgres@otus CONTEXT:  while updating tuple (0,2) in relation "accounts"
+2025-06-03 13:57:49.205 +11 [3364] postgres@otus STATEMENT:  UPDATE accounts SET amount = amount + 10.00 WHERE acc_no = 2;
+2025-06-03 13:57:49.208 +11 [3364] postgres@otus LOG:  duration: 15591.489 ms  statement: UPDATE accounts SET amount = amount + 10.00 WHERE acc_no = 2;
+2025-06-03 13:57:54.821 +11 [3568] postgres@otus LOG:  process 3568 still waiting for ShareLock on transaction 291821 after 10017.612 ms
+2025-06-03 13:57:54.821 +11 [3568] postgres@otus DETAIL:  Process holding the lock: 3364. Wait queue: 3568. 
+2025-06-03 13:57:54.821 +11 [3568] postgres@otus CONTEXT:  while updating tuple (0,1) in relation "accounts"
+2025-06-03 13:57:54.821 +11 [3568] postgres@otus STATEMENT:  UPDATE accounts SET amount = amount + 30.00 WHERE acc_no = 1;
+
+
+2025-06-03 13:58:53.519 +11 [3191] LOG:  checkpoint starting: time
+2025-06-03 13:58:53.977 +11 [3191] LOG:  checkpoint complete: wrote 5 buffers (0.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.419 s, sync=0.012 s, total=0.458 s; sync files=5, longest=0.009 s, average=0.003 s; distance=1 kB, estimate=182 kB; lsn=2/1B4043E8, redo lsn=2/1B4043A8
+2025-06-03 14:00:33.697 +11 [3568] postgres@otus LOG:  process 3568 acquired ShareLock on transaction 291821 after 168893.969 ms
+2025-06-03 14:00:33.697 +11 [3568] postgres@otus CONTEXT:  while updating tuple (0,1) in relation "accounts"
+2025-06-03 14:00:33.697 +11 [3568] postgres@otus STATEMENT:  UPDATE accounts SET amount = amount + 30.00 WHERE acc_no = 1;
+2025-06-03 14:00:33.697 +11 [3568] postgres@otus LOG:  duration: 168894.402 ms  statement: UPDATE accounts SET amount = amount + 30.00 WHERE acc_no = 1;
+
+
+Взаимоблокировка явна видна, когда во-всех трех терминалах последняя комманда на изменение не отвечает.
+Потом срабатывает ERROR:  deadlock detected
+В логах это все видно и можно отследить последовательность операций.
