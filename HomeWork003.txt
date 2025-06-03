@@ -226,16 +226,17 @@ SELECT name, setting, context, short_desc
 FROM pg_settings WHERE name like 'autovacuum%';
 
 add to end /etc/postgresql/16/main/postgresql.conf
-Добавление этих параметров по autovacuum приводит к недоступности постгреса:
-log_autovacuum_min_duration = 0
-autovacuum_max_worker = 10
-autovacuum_naptime = 25s
+log_autovacuum_min_duration = 1
+autovacuum_max_workers = 5
+autovacuum_naptime = 15s
 autovacuum_vacuum_threshold = 25
-autovacuum_vacuum_scale_factor = 0.05
-autovacuum_vacuum_cost_delay = 10
+autovacuum_vacuum_scale_factor = 0.1
+autovacuum_vacuum_cost_delay = 10ms
 autovacuum_vacuum_cost_limit = 1000
 
 -----
+Если в autovacuum_max_workers упустить в конце букву s,
+то вариант типа autovacuum_max_worker = 5 полностью кладет доступ к постгресу.
 При попытке подключиться:
 sudo -u postgres psql
 psql: error: connection to server on socket "/var/run/postgresql/.s.PGSQL.5432" failed: No such file or directory
@@ -247,16 +248,200 @@ Job for postgresql@16-main.service failed because the service did not take the s
 See "systemctl status postgresql@16-main.service" and "journalctl -xeu postgresql@16-main.service" for details.
 
 Выход, это удаление добавленных параметров по autovacuum 
-и рестарт сервиса sudo systemctl restart postgresql.service
------
+и рестарт сервиса 
+sudo systemctl restart postgresql.service
 
 -----
 select pg_reload_conf();
 sudo pg_ctlcluster 16 main restart
 
 -----
+Вариант 1
+postgres@comp1:~$ pgbench -c 50 -j 2 -P 10 -T 60 test
+pgbench (16.9 (Ubuntu 16.9-0ubuntu0.24.04.1))
+starting vacuum...end.
+progress: 10.0 s, 587.4 tps, lat 83.911 ms stddev 102.396, 0 failed
+progress: 20.0 s, 596.9 tps, lat 83.572 ms stddev 94.707, 0 failed
+progress: 30.0 s, 593.5 tps, lat 83.922 ms stddev 114.373, 0 failed
+progress: 40.0 s, 588.7 tps, lat 84.892 ms stddev 123.008, 0 failed
+progress: 50.0 s, 582.8 tps, lat 85.940 ms stddev 110.242, 0 failed
+progress: 60.0 s, 581.8 tps, lat 86.194 ms stddev 107.876, 0 failed
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 50
+number of threads: 2
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 35361
+number of failed transactions: 0 (0.000%)
+latency average = 84.806 ms
+latency stddev = 109.090 ms
+initial connection time = 60.361 ms
+tps = 589.145576 (without initial connection time)
 
+tps увеличение на 24
+по остальным параметрам тоже небольшое улучшение
 
+-----
+Вариант 2
+postgres@comp1:~$ pgbench -c8 -P 6 -T 60 test
+pgbench (16.9 (Ubuntu 16.9-0ubuntu0.24.04.1))
+starting vacuum...end.
+progress: 6.0 s, 601.3 tps, lat 13.226 ms stddev 9.770, 0 failed
+progress: 12.0 s, 625.5 tps, lat 12.787 ms stddev 9.535, 0 failed
+progress: 18.0 s, 638.2 tps, lat 12.521 ms stddev 9.284, 0 failed
+progress: 24.0 s, 625.7 tps, lat 12.779 ms stddev 9.497, 0 failed
+progress: 30.0 s, 625.3 tps, lat 12.781 ms stddev 9.661, 0 failed
+progress: 36.0 s, 614.7 tps, lat 13.002 ms stddev 10.520, 0 failed
+progress: 42.0 s, 616.7 tps, lat 12.959 ms stddev 11.146, 0 failed
+progress: 48.0 s, 638.8 tps, lat 12.515 ms stddev 9.297, 0 failed
+progress: 54.0 s, 625.3 tps, lat 12.771 ms stddev 9.631, 0 failed
+progress: 60.0 s, 622.3 tps, lat 12.855 ms stddev 10.612, 0 failed
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 1
+query mode: simple
+number of clients: 8
+number of threads: 1
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 37411
+number of failed transactions: 0 (0.000%)
+latency average = 12.816 ms
+latency stddev = 9.910 ms
+initial connection time = 17.793 ms
+tps = 623.585760 (without initial connection time)
 
+tps фактически не изменился, как и остальное
 
+-----
+CREATE TABLE student2(
+  id serial,
+  fio char(100)
+) WITH (autovacuum_enabled = off);
+
+INSERT INTO student2(fio) SELECT 'noname' FROM generate_series(1,2000000);
+
+SELECT pg_size_pretty(pg_total_relation_size('student2'));
+pg_size_pretty
+----------------
+ 269 MB
+(1 row)
+
+-----
+update student2 set fio = 'name';
+update student2 set fio = 'name2';
+update student2 set fio = 'name3';
+update student2 set fio = 'name4';
+update student2 set fio = 'name5';
+
+SELECT pg_size_pretty(pg_total_relation_size('student2'));
+pg_size_pretty 
+----------------
+ 1617 MB
+(1 row)
+
+-----
+SELECT pg_relation_filepath('student2');
+ pg_relation_filepath
+----------------------
+ base/5/24683
+(1 row)
+
+-----
+select c.relname,
+current_setting('autovacuum_vacuum_threshold') as av_base_thresh,
+current_setting('autovacuum_vacuum_scale_factor') as av_scale_factor,
+(current_setting('autovacuum_vacuum_threshold')::int +
+(current_setting('autovacuum_vacuum_scale_factor')::float * c.reltuples)) as av_thresh,
+s.n_dead_tup
+from pg_stat_user_tables s join pg_class c ON s.relname = c.relname
+where s.n_dead_tup > (current_setting('autovacuum_vacuum_threshold')::int
++ (current_setting('autovacuum_vacuum_scale_factor')::float * c.reltuples));
+
+relname  | av_base_thresh | av_scale_factor | av_thresh | n_dead_tup
+----------+----------------+-----------------+-----------+------------
+ student2 | 25             | 0.1             |      24.9 |    9999900
+(1 row)
+
+-----
+analyze student;
+
+select c.relname,
+current_setting('autovacuum_vacuum_threshold') as av_base_thresh,
+current_setting('autovacuum_vacuum_scale_factor') as av_scale_factor,
+(current_setting('autovacuum_vacuum_threshold')::int +
+(current_setting('autovacuum_vacuum_scale_factor')::float * c.reltuples)) as av_thresh,
+s.n_dead_tup
+from pg_stat_user_tables s join pg_class c ON s.relname = c.relname
+where s.n_dead_tup > (current_setting('autovacuum_vacuum_threshold')::int
++ (current_setting('autovacuum_vacuum_scale_factor')::float * c.reltuples));
+ relname  | av_base_thresh | av_scale_factor | av_thresh | n_dead_tup
+----------+----------------+-----------------+-----------+------------
+ student2 | 25             | 0.1             |  201142.5 |    9988677
+(1 row)
+
+-----
+ALTER TABLE student2 SET (autovacuum_enabled = off);
+
+SELECT pg_size_pretty(pg_total_relation_size('student2'));
+ pg_size_pretty 
+----------------
+ 1617 MB
+(1 row)
+
+update student2 set fio = 'name';
+update student2 set fio = 'name2';
+update student2 set fio = 'name3';
+update student2 set fio = 'name4';
+update student2 set fio = 'name5';
+
+ pg_size_pretty
+----------------
+ 2964 MB
+(1 row)
+
+relname  | av_base_thresh | av_scale_factor |     av_thresh      | n_dead_tup
+----------+----------------+-----------------+--------------------+------------
+ student2 | 25             | 0.1             | 200401.80000000002 |   19996119
+(1 row)
+
+SELECT relname, n_live_tup, n_dead_tup, trunc(100*n_dead_tup/(n_live_tup+1))::float "ratio%", last_autovacuum 
+FROM pg_stat_user_TABLEs WHERE relname = 'student2';
+ relname  | n_live_tup | n_dead_tup | ratio% | last_autovacuum
+----------+------------+------------+--------+-----------------
+ student2 |    2003768 |   19996119 |    997 |
+(1 row)
+
+живых реальных записей 2003768
+мертвых 19996119 записи которые нужно удалить, так как они учавствуют в запросах и т.п.
+
+размер файла значительно увеличился до 2964 MB
+
+-----
+ALTER TABLE student2 SET (autovacuum_enabled = on);
+
+ relname  | n_live_tup | n_dead_tup | ratio% |        last_autovacuum
+----------+------------+------------+--------+-------------------------------
+ student2 |    2020643 |          0 |      0 | 2025-06-03 11:59:05.970855+11
+ 
+ relname | av_base_thresh | av_scale_factor | av_thresh | n_dead_tup
+---------+----------------+-----------------+-----------+------------
+(0 rows)
+
+pg_size_pretty
+----------------
+ 2964 MB
+(1 row)
+
+после включения автовакуума и ожидания его отработки получаем таблицу только с живыми записями,
+но размер файла не изменился
+
+vacuum full student2;
+
+postgres=# SELECT pg_size_pretty(pg_total_relation_size('student2'));
+ pg_size_pretty 
+----------------
+ 269 MB
+(1 row)
 
