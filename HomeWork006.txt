@@ -1,0 +1,257 @@
+Работа с индексами
+- Написать запросы поиска данных без индексов, посмотреть их план запросов.
+- Добавить на таблицы индексы с целью оптимизации запросов поиска данных.
+- Сравнить новые планы запросов с предыдущими.
+- Сравнить применение различных типов индексов.
+
+=====
+
+
+sudo -u postgres psql < demo_big.sql
+sudo -u postgres psql -d demo	
+analyze;
+
+demo=# select count(*) from tickets;
+  count
+---------
+ 2949857
+(1 row)
+
+demo=# select pg_size_pretty(pg_total_relation_size('tickets'));
+ pg_size_pretty
+----------------
+ 475 MB
+(1 row)
+
+demo=# select pg_size_pretty(pg_table_size('tickets'));
+ pg_size_pretty
+----------------
+ 386 MB
+(1 row)
+
+demo=# select pg_size_pretty(pg_indexes_size('tickets'));
+ pg_size_pretty
+----------------
+ 89 MB
+(1 row)
+
+demo=# \d tickets;
+                        Table "bookings.tickets"
+     Column     |         Type          | Collation | Nullable | Default
+----------------+-----------------------+-----------+----------+---------
+ ticket_no      | character(13)         |           | not null |
+ book_ref       | character(6)          |           | not null |
+ passenger_id   | character varying(20) |           | not null |
+ passenger_name | text                  |           | not null |
+ contact_data   | jsonb                 |           |          |
+Indexes:
+    "tickets_pkey" PRIMARY KEY, btree (ticket_no)
+Foreign-key constraints:
+    "tickets_book_ref_fkey" FOREIGN KEY (book_ref) REFERENCES bookings(book_ref)
+Referenced by:
+    TABLE "ticket_flights" CONSTRAINT "ticket_flights_ticket_no_fkey" FOREIGN KEY (ticket_no) REFERENCES tickets(ticket_no)
+	
+---
+explain (costs, verbose, format json)--, analyze) 
+select * from bookings as bkg inner join tickets as tct on bkg.book_ref = tct.book_ref;
+
+#	Node	RowsPlan
+1.	 Hash Inner Join (cost=73357.98..264590.96 rows=2949780 width=125)
+Hash Cond: (tct.book_ref = bkg.book_ref)											2949780
+2.	 Seq Scan on bookings.tickets as tct (cost=0..78937.8 rows=2949780 width=104)	2949780
+3.	 Hash (cost=34599.1..34599.1 rows=2111110 width=21)								2111110
+4.	 Seq Scan on bookings.bookings as bkg (cost=0..34599.1 rows=2111110 width=21)	2111110
+	
+---
+create index on tickets(book_ref); 
+analyze tickets;
+
+demo=# select pg_size_pretty(pg_table_size('tickets_book_ref_idx'));
+ pg_size_pretty
+----------------
+ 59 MB
+(1 row)
+
+---
+explain (costs, verbose, format json, analyze) select * from tickets order by ticket_no;
+
+ Index Scan using tickets_pkey on bookings.tickets as tickets (cost=0.43..107903.15 rows=2950688 width=104) (actual=0.013..365.362 rows=2949857 loops=1)	
+ 365.362 ms	365.362 ms	↑ 1.01	2949857	2950688	1
+ 
+ 
+explain  select * from tickets where ticket_no = '0005432000864';
+
+"Index Scan using tickets_pkey on tickets  (cost=0.43..2.95 rows=1 width=104)"
+"  Index Cond: (ticket_no = '0005432000864'::bpchar)"
+
+Используется индекс tickets_pkey
+
+---
+explain (costs, verbose, format json)--, analyze) 
+select * from bookings as bkg inner join tickets as tct on bkg.book_ref = tct.book_ref;
+
+#	Node	RowsPlan
+1.	 Merge Inner Join (cost=2.4..209985.48 rows=2950688 width=125)						2950688
+2.	 Index Scan using bookings_pkey on bookings.bookings as bkg (cost=0.43..52395.33 rows=2111110 width=21)	2111110
+3.	 Index Scan using tickets_book_ref_idx1 on bookings.tickets as tct (cost=0.43..115429.35 rows=2950688 width=104)	2950688
+	
+Тут уже используются индексы bookings_pkey и tickets_book_ref_idx1
+cost=2.4.. значительно меньше
+
+---
+без индекса
+explain (costs, verbose, format json, analyze) 
+select passenger_name from tickets 
+where passenger_name = 'EVGENIY MAKAROV'
+
+#	Node	Timings	Rows	Loops
+Exclusive	Inclusive	Rows X	Actual	Plan
+1.	 Gather (cost=1000..65834.57 rows=264 width=16) (actual=0.581..127.309 rows=915 loops=1)	35.446 ms	127.309 ms	↓ 3.47	915	264	1
+2.	 Seq Scan on bookings.tickets as tickets (cost=0..64808.17 rows=110 width=16) (actual=0.588..91.863 rows=305 loops=3)
+Filter: (tickets.passenger_name = 'EVGENIY MAKAROV'::text)
+Rows Removed by Filter: 982981
+91.863 ms	91.863 ms	↓ 2.78	305	110	3
+
+---
+create index on tickets(passenger_name);
+analyze tickets;
+vacuum tickets;
+
+explain (costs, verbose, format json, analyze) 
+select passenger_name from tickets 
+where passenger_name = 'EVGENIY MAKAROV'
+
+#	Node	Timings	Rows	Loops
+Exclusive	Inclusive	Rows X	Actual	Plan
+1.	 Index Only Scan using tickets_passenger_name_idx on bookings.tickets as tickets (cost=0.43..6.33 rows=266 width=16) (actual=3.781..3.825 rows=915 loops=1)
+Index Cond: (tickets.passenger_name = 'EVGENIY MAKAROV'::text)
+3.825 ms	3.825 ms	↓ 3.44	915	266	1
+
+Тот же запрос с индексом tickets_passenger_name_idx значительно дешевле и быстрее
+
+---
+
+	
+	
+	
+	
+	
+	
+	
+Вариант с таблицами  flights и airports
+---
+explain (costs, verbose, format json)--, analyze) 
+select * from flights as fl inner join airports as ap on fl.departure_airport = ap.airport_code;
+
+#	Node	RowsPlan
+1.	 Hash Inner Join (cost=4.34..5412.02 rows=214867 width=132)
+Hash Cond: (fl.departure_airport = ap.airport_code)								214867
+2.	 Seq Scan on bookings.flights as fl (cost=0..4820.67 rows=214867 width=63)	214867
+3.	 Hash (cost=3.04..3.04 rows=104 width=69)									104
+4.	 Seq Scan on bookings.airports as ap (cost=0..3.04 rows=104 width=69)		104
+
+
+explain (costs, verbose, format json)--, analyze) 
+select flight_no, status, departure_airport, airport_name from flights as fl inner join airports as ap on fl.departure_airport = ap.airport_code;
+
+#	Node	RowsPlan
+1.	 Hash Inner Join (cost=4.34..5412.02 rows=214867 width=36)
+Hash Cond: (fl.departure_airport = ap.airport_code)								214867
+2.	 Seq Scan on bookings.flights as fl (cost=0..4820.67 rows=214867 width=19)	214867
+3.	 Hash (cost=3.04..3.04 rows=104 width=21)									104
+4.	 Seq Scan on bookings.airports as ap (cost=0..3.04 rows=104 width=21)		104
+
+---
+create index on flights(flight_no); 
+
+demo=# select pg_size_pretty(pg_table_size('flights_flight_no_idx'));
+ pg_size_pretty
+----------------
+ 1488 kB
+(1 row)
+
+demo=# select pg_size_pretty(pg_table_size('flights'));
+ pg_size_pretty
+----------------
+ 21 MB
+(1 row)
+
+---
+analyze flights;
+
+demo=# show random_page_cost;
+ random_page_cost
+------------------
+ 1.25
+(1 row)
+
+---
+explain (costs, verbose, format json, analyze) select * from flights order by flight_no;
+
+	#	Node	Timings	Rows	Loops
+Exclusive	Inclusive	Rows X	Actual	Plan
+1.	 Index Scan using flights_flight_no_idx on bookings.flights as flights (cost=0.29..6789.56 rows=214867 width=63) (actual=0.048..24.704 rows=214867 loops=1)	24.704 ms	24.704 ms	↑ 1	214867	214867	1
+
+
+explain  select * from flights where flight_no = 'PG0403';
+
+"Bitmap Heap Scan on flights  (cost=3.68..315.26 rows=276 width=63)"
+"  Recheck Cond: (flight_no = 'PG0403'::bpchar)"
+"  ->  Bitmap Index Scan on flights_flight_no_idx  (cost=0.00..3.61 rows=276 width=0)"
+"        Index Cond: (flight_no = 'PG0403'::bpchar)"
+
+---
+create index on flights(departure_airport);
+
+explain (costs, verbose, format json)--, analyze) 
+select departure_airport, airport_name from flights as fl inner join airports as ap on fl.departure_airport = ap.airport_code;
+
+#	Node	Rows
+Plan
+1.	 Hash Inner Join (cost=4.63..4108.25 rows=214867 width=21)
+Hash Cond: (fl.departure_airport = ap.airport_code)
+214867
+2.	 Index Only Scan using flights_departure_airport_idx on bookings.flights as fl (cost=0.29..3516.9 rows=214867 width=4)	214867
+3.	 Hash (cost=3.04..3.04 rows=104 width=21)	104
+4.	 Seq Scan on bookings.airports as ap (cost=0..3.04 rows=104 width=21)	104
+
+Тут уже используется индекс flights_departure_airport_idx
+
+---
+----- покрывающие индексы
+просто ради эксперимента
+create index flight_no on flights (flight_no) include (status,departure_airport); 
+analyze flights;
+
+explain (costs, verbose, format json)--, analyze) 
+select flight_no, status, departure_airport, airport_name from flights as fl inner join airports as ap on fl.departure_airport = ap.airport_code;
+
+#	Node	RowsPlan
+1.	 Hash Inner Join (cost=4.76..5209.67 rows=214867 width=36)
+Hash Cond: (fl.departure_airport = ap.airport_code)								214867
+2.	 Index Only Scan using flight_no on bookings.flights as fl (cost=0.42..4618.32 rows=214867 width=19)																		214867
+3.	 Hash (cost=3.04..3.04 rows=104 width=21)									104
+4.	 Seq Scan on bookings.airports as ap (cost=0..3.04 rows=104 width=21)		104
+
+Используется покрывающий индекс flight_no и после добавление недостающей информации из таблицы airports 
+Похоже, что цена даже возросла. Поиск в airports идет без индекса видимо из-за малого количества записей.
+
+---
+А тут уже используются индексы в обеих таблицах
+
+explain (costs, verbose, format json)--, analyze) 
+select flight_no, status, departure_airport from flights as fl inner join airports as ap on fl.departure_airport = ap.airport_code order by flight_no;
+
+#	Node	Rows
+Plan
+1.	 Nested Loop Inner Join (cost=0.57..9976.37 rows=214867 width=19)	214867
+2.	 Index Only Scan using flight_no on bookings.flights as fl (cost=0.42..4618.31 rows=214867 width=19)																214867
+3.	 Memoize (cost=0.15..0.17 rows=1 width=4)							1
+4.	 Index Only Scan using airports_airport_code_idx on bookings.airports as ap (cost=0.14..0.16 rows=1 width=4)
+Index Cond: (ap.airport_code = fl.departure_airport)					1
+
+---
+
+
+
+
